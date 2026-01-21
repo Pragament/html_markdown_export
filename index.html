@@ -9,6 +9,9 @@
     <!-- Marked.js for Markdown parsing -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <!-- Docx.js for DOCX export -->
+    <script src="https://unpkg.com/docx@7.7.0/build/index.js"></script>
+    <script src="https://unpkg.com/file-saver@2.0.5/dist/FileSaver.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -88,10 +91,11 @@
             display: flex;
             gap: 10px;
             margin-top: 20px;
+            flex-wrap: wrap;
         }
         
         button {
-            padding: 12px 24px;
+            padding: 12px 20px;
             border: none;
             border-radius: 6px;
             font-weight: 600;
@@ -100,6 +104,7 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            font-size: 14px;
         }
         
         button:hover {
@@ -123,6 +128,11 @@
             color: white;
         }
         
+        .btn-warning {
+            background: #fbbc05;
+            color: #202124;
+        }
+        
         textarea {
             width: 100%;
             height: 350px;
@@ -142,7 +152,7 @@
         }
         
         #preview {
-            height: 400px;
+            height: 380px;
             overflow-y: auto;
             padding: 20px;
             background: white;
@@ -216,6 +226,8 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
         }
         
         .latex-info {
@@ -239,10 +251,46 @@
         .controls {
             display: flex;
             justify-content: center;
-            gap: 15px;
+            gap: 10px;
             margin-top: 25px;
             padding-top: 25px;
             border-top: 1px solid #e0e0e0;
+            flex-wrap: wrap;
+        }
+        
+        .export-options {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .loading {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+        }
+        
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #1a73e8;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-bottom: 20px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
         }
     </style>
 </head>
@@ -250,7 +298,7 @@
     <div class="container">
         <header>
             <h1>📝 Markdown to Google Doc Converter</h1>
-            <p>Convert Markdown with LaTeX equations to Google Docs format</p>
+            <p>Convert Markdown with LaTeX equations to Google Docs and DOCX format</p>
         </header>
         
         <div class="main-content">
@@ -294,15 +342,20 @@ Polynomials are math expressions with variables (like x) raised to whole number 
                     <p>Preview will appear here...</p>
                 </div>
                 <div class="controls">
-                    <button onclick="copyToClipboard()" class="btn-secondary">
-                        📋 Copy HTML
-                    </button>
-                    <button onclick="downloadHTML()" class="btn-success">
-                        💾 Download as HTML
-                    </button>
-                    <button onclick="exportToGoogleDocs()" class="btn-primary">
-                        🚀 Export to Google Docs
-                    </button>
+                    <div class="export-options">
+                        <button onclick="copyToClipboard()" class="btn-secondary">
+                            📋 Copy HTML
+                        </button>
+                        <button onclick="downloadHTML()" class="btn-success">
+                            💾 Download HTML
+                        </button>
+                        <button onclick="downloadDOCX()" class="btn-warning">
+                            📄 Download DOCX
+                        </button>
+                        <button onclick="exportToGoogleDocs()" class="btn-primary">
+                            🚀 Open in Google Docs
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -319,69 +372,140 @@ Polynomials are math expressions with variables (like x) raised to whole number 
         </div>
     </div>
 
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div id="loadingText">Generating DOCX file...</div>
+    </div>
+
     <script>
-        // Configure marked.js to handle LaTeX
+        // Check if docx is loaded
+        if (typeof docx === 'undefined') {
+            console.warn('docx library not loaded. DOCX export will not work.');
+        }
+
+        // Configure marked.js
         marked.setOptions({
             breaks: true,
             gfm: true,
             highlight: function(code, lang) {
-                // Simple syntax highlighting fallback
                 return code;
             }
         });
 
         // Custom renderer to handle LaTeX
-        const renderer = new marked.Renderer();
-        
-        // Override paragraph rendering to handle inline LaTeX
-        renderer.paragraph = function(text) {
-            // Process LaTeX in paragraphs
-            text = processLatexInText(text);
-            return `<p>${text}</p>`;
+        const renderer = {
+            // Paragraph
+            paragraph(text) {
+                return `<p>${processLatexInText(text)}</p>`;
+            },
+            
+            // Headings
+            heading(text, level) {
+                return `<h${level}>${processLatexInText(text)}</h${level}>`;
+            },
+            
+            // Table
+            table(header, body) {
+                return `<table class="markdown-table"><thead>${header}</thead><tbody>${body}</tbody></table>`;
+            },
+            
+            // Table row
+            tablerow(content) {
+                return `<tr>${content}</tr>`;
+            },
+            
+            // Table cell - FIXED: Properly handle flags object
+            tablecell(content, flags) {
+                const isHeader = flags && flags.header === true;
+                const tag = isHeader ? 'th' : 'td';
+                const align = flags && flags.align ? ` style="text-align:${flags.align}"` : '';
+                return `<${tag}${align}>${processLatexInText(content)}</${tag}>`;
+            },
+            
+            // Code
+            code(code, language, isEscaped) {
+                return `<pre><code class="language-${language || ''}">${processLatexInText(code)}</code></pre>`;
+            },
+            
+            // Codespan
+            codespan(text) {
+                return `<code>${processLatexInText(text)}</code>`;
+            },
+            
+            // List
+            list(body, ordered, start) {
+                const type = ordered ? 'ol' : 'ul';
+                const startAttr = ordered && start !== 1 ? ` start="${start}"` : '';
+                return `<${type}${startAttr}>${body}</${type}>`;
+            },
+            
+            // List item
+            listitem(text) {
+                return `<li>${processLatexInText(text)}</li>`;
+            },
+            
+            // Strong
+            strong(text) {
+                return `<strong>${processLatexInText(text)}</strong>`;
+            },
+            
+            // Emphasis
+            em(text) {
+                return `<em>${processLatexInText(text)}</em>`;
+            },
+            
+            // Text
+            text(text) {
+                return processLatexInText(text);
+            }
         };
 
-        // Override heading rendering
-        renderer.heading = function(text, level) {
-            const escapedText = processLatexInText(text);
-            return `<h${level}>${escapedText}</h${level}>`;
-        };
-
-        // Override table cell rendering
-        renderer.tablecell = function(content, flags) {
-            const type = flags.header ? 'th' : 'td';
-            const processedContent = processLatexInText(content);
-            return `<${type}>${processedContent}</${type}>`;
-        };
-
+        // Process LaTeX in text
         function processLatexInText(text) {
-            // Handle inline LaTeX: \(...\)
-            text = text.replace(/\$\$([\s\S]+?)\$\$/g, function(match, latex) {
+            if (typeof text !== 'string') return text;
+            
+            let result = text;
+            
+            // Handle display mode LaTeX: $$...$$
+            result = result.replace(/\$\$([\s\S]+?)\$\$/g, function(match, latex) {
                 try {
-                    return katex.renderToString(latex.trim(), { displayMode: true });
+                    return katex.renderToString(latex.trim(), { 
+                        displayMode: true,
+                        throwOnError: false
+                    });
                 } catch (e) {
-                    return `<span style="color: red">LaTeX Error: ${e.message}</span>`;
+                    console.error('LaTeX display error:', e);
+                    return `<span class="latex-error">$$${latex}$$</span>`;
                 }
             });
             
-            // Handle display LaTeX: $$...$$
-            text = text.replace(/\\\(([\s\S]+?)\\\)/g, function(match, latex) {
+            // Handle inline LaTeX: \(...\) 
+            result = result.replace(/\\\(([\s\S]+?)\\\)/g, function(match, latex) {
                 try {
-                    return katex.renderToString(latex.trim(), { displayMode: false });
+                    return katex.renderToString(latex.trim(), { 
+                        displayMode: false,
+                        throwOnError: false
+                    });
                 } catch (e) {
-                    return `<span style="color: red">LaTeX Error: ${e.message}</span>`;
+                    console.error('LaTeX inline error:', e);
+                    return `<span class="latex-error">\\(${latex}\\)</span>`;
                 }
             });
             
-            // Also handle $...$ format
-            text = text.replace(/\$([^\$]+)\$/g, function(match, latex) {
+            // Handle $...$ format
+            result = result.replace(/(^|\s|\()\$([^\$]+)\$(\s|\)|$|\.|,)/g, function(match, before, latex, after) {
                 try {
-                    return katex.renderToString(latex.trim(), { displayMode: false });
+                    return before + katex.renderToString(latex.trim(), { 
+                        displayMode: false,
+                        throwOnError: false
+                    }) + after;
                 } catch (e) {
-                    return `<span style="color: red">LaTeX Error: ${e.message}</span>`;
+                    console.error('LaTeX $ error:', e);
+                    return `${before}<span class="latex-error">$${latex}$</span>${after}`;
                 }
             });
             
-            return text;
+            return result;
         }
 
         // Update character and word counts
@@ -391,14 +515,27 @@ Polynomials are math expressions with variables (like x) raised to whole number 
             const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0;
             
             // Count tables and equations
-            const tableCount = (text.match(/\|/g) || []).length > 0 ? 
-                (text.match(/\n\|/g) || []).length : 0;
+            const lines = text.split('\n');
+            let tableCount = 0;
+            let inTable = false;
+            
+            lines.forEach(line => {
+                if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+                    if (!inTable) {
+                        tableCount++;
+                        inTable = true;
+                    }
+                } else {
+                    inTable = false;
+                }
+            });
+            
             const equationCount = (text.match(/\\\(|\$\$/g) || []).length;
             
             document.getElementById('charCount').textContent = charCount;
             document.getElementById('wordCount').textContent = wordCount;
             document.getElementById('tableCount').textContent = tableCount;
-            document.getElementById('equationCount').textContent = equationCount;
+            document.getElementById('equationCount').textContent = Math.floor(equationCount / 2);
         }
 
         // Convert Markdown to Google Docs styled HTML
@@ -410,8 +547,8 @@ Polynomials are math expressions with variables (like x) raised to whole number 
             }
 
             try {
-                // Convert Markdown to HTML
-                let html = marked.parse(markdown, { renderer: renderer });
+                // Convert Markdown to HTML with custom renderer
+                const html = marked.parse(markdown, { renderer });
                 
                 // Apply Google Docs styling
                 const styledHtml = `
@@ -542,6 +679,13 @@ Roots: \\(x = 3\\) and \\(x = -1\\)`;
             margin: 1em 0;
             overflow-x: auto;
         }
+        .latex-error {
+            color: #d93025;
+            background: #fce8e6;
+            padding: 2px 4px;
+            border-radius: 2px;
+            border: 1px solid #f28b82;
+        }
     </style>
 </head>
 <body>
@@ -560,6 +704,154 @@ Roots: \\(x = 3\\) and \\(x = -1\\)`;
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
             showNotification('💾 HTML file downloaded!');
+        }
+
+        // Download as DOCX file
+        async function downloadDOCX() {
+            if (typeof docx === 'undefined') {
+                alert('DOCX library not loaded. Please check your internet connection and try again.');
+                return;
+            }
+
+            const markdown = document.getElementById('markdownInput').value;
+            if (!markdown.trim()) {
+                alert('Please enter some Markdown content first!');
+                return;
+            }
+
+            showLoading('Generating DOCX file...');
+            
+            try {
+                // Parse markdown to create document sections
+                const lines = markdown.split('\n');
+                const docChildren = [];
+                
+                for (let i = 0; i < lines.length; i++) {
+                    const line = lines[i].trim();
+                    
+                    if (line.startsWith('## ')) {
+                        // Heading level 2
+                        const text = line.replace('## ', '').replace('**', '').replace('**', '');
+                        docChildren.push(
+                            new docx.Paragraph({
+                                text: text,
+                                heading: docx.HeadingLevel.HEADING_2,
+                                spacing: { after: 200 }
+                            })
+                        );
+                    } else if (line.startsWith('### ')) {
+                        // Heading level 3
+                        const text = line.replace('### ', '').replace('**', '').replace('**', '');
+                        docChildren.push(
+                            new docx.Paragraph({
+                                text: text,
+                                heading: docx.HeadingLevel.HEADING_3,
+                                spacing: { after: 200 }
+                            })
+                        );
+                    } else if (line.startsWith('|') && line.endsWith('|')) {
+                        // Table row
+                        const cells = line.split('|').slice(1, -1).map(cell => cell.trim());
+                        
+                        if (i === 0 || !lines[i-1].trim().startsWith('|')) {
+                            // Start of table - create header row
+                            const headerRow = new docx.TableRow({
+                                children: cells.map(cell => new docx.TableCell({
+                                    children: [new docx.Paragraph(cell)],
+                                    shading: { fill: "F2F2F2" }
+                                }))
+                            });
+                            
+                            // Collect all table rows
+                            const tableRows = [headerRow];
+                            let j = i + 1;
+                            
+                            while (j < lines.length && lines[j].trim().startsWith('|') && lines[j].trim().endsWith('|')) {
+                                if (lines[j].includes('---')) {
+                                    j++;
+                                    continue; // Skip separator lines
+                                }
+                                
+                                const rowCells = lines[j].split('|').slice(1, -1).map(cell => cell.trim());
+                                tableRows.push(
+                                    new docx.TableRow({
+                                        children: rowCells.map(cell => new docx.TableCell({
+                                            children: [new docx.Paragraph(cell)]
+                                        }))
+                                    })
+                                );
+                                j++;
+                            }
+                            
+                            // Create table
+                            docChildren.push(
+                                new docx.Table({
+                                    rows: tableRows,
+                                    width: { size: 100, type: docx.WidthType.PERCENTAGE }
+                                })
+                            );
+                            
+                            i = j - 1; // Skip processed table rows
+                        }
+                    } else if (line.startsWith('---') || line.startsWith('***')) {
+                        // Horizontal rule
+                        docChildren.push(
+                            new docx.Paragraph({
+                                children: [
+                                    new docx.TextRun({
+                                        text: "________________________________________________________________________",
+                                        color: "CCCCCC"
+                                    })
+                                ],
+                                spacing: { before: 100, after: 100 }
+                            })
+                        );
+                    } else if (line) {
+                        // Regular paragraph
+                        // Simple handling for bold text
+                        let text = line;
+                        text = text.replace(/\*\*(.*?)\*\*/g, '$1'); // Remove markdown bold
+                        text = text.replace(/\\\(.*?\\\)/g, ''); // Remove LaTeX for now
+                        text = text.replace(/\$\$.*?\$\$/g, ''); // Remove LaTeX display
+                        
+                        if (text.trim()) {
+                            docChildren.push(
+                                new docx.Paragraph({
+                                    text: text,
+                                    spacing: { after: 100 }
+                                })
+                            );
+                        }
+                    } else if (line === '') {
+                        // Empty line - add spacing
+                        docChildren.push(
+                            new docx.Paragraph({
+                                text: "",
+                                spacing: { after: 100 }
+                            })
+                        );
+                    }
+                }
+                
+                // Create document
+                const doc = new docx.Document({
+                    sections: [{
+                        properties: {},
+                        children: docChildren
+                    }]
+                });
+                
+                // Generate and download
+                const buffer = await docx.Packer.toBlob(doc);
+                saveAs(buffer, "markdown-export.docx");
+                
+                showNotification('📄 DOCX file downloaded successfully!');
+            } catch (error) {
+                console.error('Error generating DOCX:', error);
+                showNotification('❌ Error generating DOCX file: ' + error.message, 'error');
+            } finally {
+                hideLoading();
+            }
         }
 
         // Export to Google Docs (simulated - opens in new tab)
@@ -592,18 +884,35 @@ Roots: \\(x = 3\\) and \\(x = -1\\)`;
                             border: 1px solid #ddd;
                             padding: 12px;
                         }
+                        .katex-display {
+                            margin: 1em 0;
+                        }
                     </style>
                 </head>
                 <body>
                     ${htmlContent}
                     <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"><\/script>
                     <script>
-                        alert('For actual Google Docs export:\\n1. Copy this content\\n2. Open Google Docs\\n3. Paste with formatting (Ctrl+Shift+V)\\n4. Or use Google Docs API for automation');
+                        alert('To use in Google Docs:\\n\\n1. Select all content (Ctrl+A)\\n2. Copy (Ctrl+C)\\n3. Open Google Docs\\n4. Paste with formatting (Ctrl+Shift+V)\\n\\nNote: LaTeX equations will be rendered as images.');
                     <\/script>
                 </body>
                 </html>
             `);
             showNotification('🚀 Opening Google Docs preview...');
+        }
+
+        // Show loading indicator
+        function showLoading(text = 'Loading...') {
+            const loading = document.getElementById('loading');
+            const loadingText = document.getElementById('loadingText');
+            loadingText.textContent = text;
+            loading.style.display = 'flex';
+        }
+
+        // Hide loading indicator
+        function hideLoading() {
+            const loading = document.getElementById('loading');
+            loading.style.display = 'none';
         }
 
         // Show notification
@@ -632,27 +941,38 @@ Roots: \\(x = 3\\) and \\(x = -1\\)`;
             }, 3000);
         }
 
-        // Add CSS animation
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes slideIn {
-                from { transform: translateX(100%); opacity: 0; }
-                to { transform: translateX(0); opacity: 1; }
-            }
-            @keyframes slideOut {
-                from { transform: translateX(0); opacity: 1; }
-                to { transform: translateX(100%); opacity: 0; }
-            }
-        `;
-        document.head.appendChild(style);
-
-        // Initialize counts and convert sample on load
+        // Initialize
         document.addEventListener('DOMContentLoaded', function() {
             updateCounts();
-            convertMarkdown();
+            
+            // Convert initial sample content
+            setTimeout(() => {
+                convertMarkdown();
+            }, 100);
             
             // Update counts on input
             document.getElementById('markdownInput').addEventListener('input', updateCounts);
+            
+            // Add CSS for latex errors
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes slideIn {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+                @keyframes slideOut {
+                    from { transform: translateX(0); opacity: 1; }
+                    to { transform: translateX(100%); opacity: 0; }
+                }
+                .latex-error {
+                    color: #d93025;
+                    background: #fce8e6;
+                    padding: 2px 4px;
+                    border-radius: 2px;
+                    border: 1px solid #f28b82;
+                }
+            `;
+            document.head.appendChild(style);
         });
     </script>
 </body>
